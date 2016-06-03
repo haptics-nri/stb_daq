@@ -5,7 +5,7 @@
 #include <math.h>
 
 #include "TimerObject.h"
-TimerObject *timer1 = new TimerObject(1);
+//TimerObject *timer1 = new TimerObject(0);
 
 #include "I2Cdev.h"
 #include "LSM303DLHC.h"
@@ -19,14 +19,16 @@ int16_t ax, ay, az;
 int16_t gx, gy, gz;
 int16_t mx, my, mz;
 
-uint8_t buffer_accel[50];
-uint8_t buffer_gyro[50];
-uint8_t buffer_mag[6];
+volatile uint8_t buffer_accel[200];
+volatile uint8_t buffer_gyro[200];
+volatile uint8_t buffer_mag[6];
 
 
-uint8_t number_gyro;
-uint8_t number_accel;
-bool imuReady = 0;
+volatile uint8_t number_gyro = 0;
+volatile uint8_t number_accel = 0;
+volatile bool imuReady = 0;
+volatile bool imuLocked = 0;
+bool reading = false;
 
 #define RESET       0x10
 
@@ -79,18 +81,41 @@ byte PS_Status =  0;
 IntervalTimer irq;
 
 void readIMU(){
+  while (imuLocked == 1) { } // spin
 
   number_accel = accelMag.getAccelFIFOStoredSamples();
+  
   for (byte i=0; i<number_accel; i++){
-    accelMag.getAccelByte(&buffer_accel[6*i]);
+    accelMag.getAccelByte((uint8_t*)&buffer_accel[6*i]);
   }
-  accelMag.getMagByte(buffer_mag);
-  number_gyro = gyro.getFIFOStoredDataLevel();
-  for (byte i=0; i<number_gyro; i++){ 
-    gyro.getGyroByte(&buffer_gyro[6*i]);
-  }
-  imuReady = 1;
 
+  accelMag.setAccelFIFOMode(LSM303DLHC_FM_BYBASS);
+  accelMag.setAccelFIFOMode(LSM303DLHC_FM_FIFO);
+  
+  accelMag.getMagByte((uint8_t*)buffer_mag);
+  
+  number_gyro = gyro.getFIFOStoredDataLevel();
+  
+  for (byte i=0; i<number_gyro; i++){ 
+    gyro.getGyroByte((uint8_t*)&buffer_gyro[6*i]);
+  }
+
+  gyro.setFIFOMode(L3GD20H_FM_BYPASS);
+  gyro.setFIFOMode(L3GD20H_FM_FIFO);
+
+  /*
+  unsigned long m = micros();
+  buffer_mag[0] = (m & 0xFF000000) >> 24;
+  buffer_mag[1] = (m & 0x00FF0000) >> 16;
+  buffer_mag[2] = (m & 0x0000FF00) >> 8;
+  buffer_mag[3] = (m & 0x000000FF);
+  buffer_mag[4] = number_accel;
+  buffer_mag[5] = number_gyro;
+  number_accel = 0;
+  number_gyro = 0;
+  */
+  
+  imuReady = 1;
 }
 
 
@@ -106,37 +131,44 @@ byte setupReg(byte cksel, byte refsel, byte diffsel)
   return command;
 }
 
+#define w(b) { data[k] = b; ++k; }
+
 void readADC(void)
 {
+  noInterrupts();
 
   static byte j = 0;
-  static byte data[50];
+  byte data[500];
   byte i = 0;
-
   
   j++;
 
-
-  Serial.flush();
-  Serial.write("aaa");
-  
+  int k = 0;
+  w('a');
+  w('a');
+  w('a');
   
   if (imuReady==1){
-    Serial.write(33+6*(number_accel+number_gyro+1));
-    Serial.write(number_accel); Serial.write(number_gyro);
-    Serial.write(buffer_accel, 6*number_accel);
-    Serial.write(buffer_gyro,  6*number_gyro);
-    Serial.write(buffer_mag,   6);
+    imuLocked = 1;
+    w(33 + 6*(number_accel+number_gyro+1));
+    w(number_accel); w(number_gyro);
+    for (int l = 0; l < 6*number_accel; l++) w(buffer_accel[l]);
+    for (int l = 0; l < 6*number_gyro;  l++) w(buffer_gyro[l]);
+    for (int l = 0; l < 6;              l++) w(buffer_mag[l]);
+    //Serial.write((uint8_t*)buffer_accel, 6*number_accel);
+    //Serial.write((uint8_t*)buffer_gyro,  6*number_gyro);
+    //Serial.write((uint8_t*)buffer_mag,   6);
     imuReady = 0;
+    imuLocked = 0;
   }
   else{
-    Serial.write(31);
+    data[k++] = 31;
   }
 
   for (i = 0; i < 12; i++)
   { 
     digitalWrite(CS_FT, LOW);
-    data[i] = SPI.transfer(0x00);
+    w(SPI.transfer(0x00));
     digitalWrite(CS_FT, HIGH);
     delayMicroseconds(2);
   }
@@ -144,14 +176,16 @@ void readADC(void)
   for (i = 12; i < 30; i++)
   { 
     digitalWrite(CS_ACC, LOW);
-    data[i] = SPI.transfer(0x00);
+    w(SPI.transfer(0x00));
     digitalWrite(CS_ACC, HIGH);
     delayMicroseconds(2);
   }
 
-  data[30] = j;
+  w(j);
 
-  Serial.write(data, 31);
+  Serial.write(data, k);
+  interrupts();
+  Serial.flush();
   
   digitalWrite(CS_FT, LOW);
   SPI.transfer(CONV_FT);
@@ -160,8 +194,6 @@ void readADC(void)
   digitalWrite(CS_ACC, LOW);
   SPI.transfer(CONV_ACC);
   digitalWrite(CS_ACC, HIGH);
-
-
 }
 void pulseCS(char pin)
 {
@@ -200,7 +232,7 @@ void parkingSpot(void)
   if(digitalRead(opto)==HIGH)PS_Status=PS_Status   |1;
   if(digitalRead(stick)==HIGH)PS_Status=PS_Status  |2;
   if(digitalRead(biotac)==HIGH)PS_Status=PS_Status |4;
-  Serial.write(PS_Status);
+  Serial.write(0x30 + PS_Status);
   PS_Status = 0;
 }
 
@@ -239,7 +271,8 @@ void setup(void)
   SPI.setClockDivider(SPI_CLOCK_DIV2);
   SPI.setDataMode(SPI_MODE0);
 
-   Wire.begin();
+  Wire.begin();
+  Wire.setClock(400000L);
   accelMag.initialize();
   accelMag.setAccelFullScale(4);
   accelMag.setAccelBlockDataUpdateEnabled(true);
@@ -257,7 +290,7 @@ void setup(void)
   gyro.setBandwidthCutOffMode(L3GD20H_BW_MED_LOW);
 
    
-  timer1->setOnTimer(&readIMU);
+  //timer1->setOnTimer(&readIMU);
 }
 
 void loop(void)
@@ -267,7 +300,8 @@ void loop(void)
   byte sample_rate_buff[2];
   int sample_rate;
   byte packet_length;
-  timer1->Update();
+  //timer1->Update();
+  if (reading) readIMU();
 
   if (Serial.available())
   {
@@ -278,8 +312,6 @@ void loop(void)
     {
       message[i] = Serial.read();
     }
-
-    Serial.flush();
 
     if (message[0] == START)
     {
@@ -301,27 +333,27 @@ void loop(void)
       delayMicroseconds(sample_rate);
       accelMag.setAccelFIFOEnabled(false);
       accelMag.setAccelFIFOMode(LSM303DLHC_FM_BYBASS);
-      accelMag.setAccelFIFOMode(LSM303DLHC_FM_STREAM);
+      accelMag.setAccelFIFOMode(LSM303DLHC_FM_FIFO);
       accelMag.setAccelFIFOEnabled(true);
-      accelMag.rebootAccelMemoryContent();
       gyro.setFIFOEnabled(false);
       gyro.setFIFOMode(L3GD20H_FM_BYPASS);
-      gyro.setFIFOMode(L3GD20H_FM_STREAM);
+      gyro.setFIFOMode(L3GD20H_FM_FIFO);
       gyro.setFIFOEnabled(true);
-      gyro.rebootMemoryContent();
       irq.begin(readADC, sample_rate);
-      timer1->Start();
+      //timer1->Start();
+      reading = true;
     }
 
     if (message[0] == STOP){
       irq.end();
-      timer1->Stop();
+      //timer1->Stop();
+      reading = false;
     }
 
     if (message[0] == PING)
       {
         irq.end();
-        Serial.flush();
+        reading = false;
         Serial.write(0x01);
       }
     
@@ -331,7 +363,11 @@ void loop(void)
       }
     
     if (!Serial.dtr())
-      irq.end();  
+    {
+      irq.end();
+      reading = false;
+    }
+    
     interrupts();
 
   }
