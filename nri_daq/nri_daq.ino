@@ -79,7 +79,7 @@ byte PS_Status =  0;
 #define REQUEST_PS '4'
 
 IntervalTimer irq;
-#define spi_settings SPISettings(10000000L, MSBFIRST, SPI_MODE0)
+SPISettings spi_settings(10000000L, MSBFIRST, SPI_MODE0);
 
 void readIMU(){
   while (imuLocked == 1) { } // spin
@@ -340,12 +340,12 @@ void loop(void)
       accelMag.setAccelFIFOEnabled(false);
       accelMag.setAccelFIFOMode(LSM303DLHC_FM_BYBASS);
       accelMag.setAccelFIFOMode(LSM303DLHC_FM_STREAM);
-      accelMag.rebootAccelMemoryContent();
+      //accelMag.rebootAccelMemoryContent();
       accelMag.setAccelFIFOEnabled(true);
       gyro.setFIFOEnabled(false);
       gyro.setFIFOMode(L3GD20H_FM_BYPASS);
       gyro.setFIFOMode(L3GD20H_FM_STREAM);
-      gyro.rebootMemoryContent();
+      //gyro.rebootMemoryContent();
       gyro.setFIFOEnabled(true);
       irq.begin(readADC, sample_rate);
       //timer1->Start();
