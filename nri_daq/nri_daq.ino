@@ -79,30 +79,31 @@ byte PS_Status =  0;
 #define REQUEST_PS '4'
 
 IntervalTimer irq;
+SPISettings spi_settings(10000000L, MSBFIRST, SPI_MODE0);
 
 void readIMU(){
   while (imuLocked == 1) { } // spin
-
+  
   number_accel = accelMag.getAccelFIFOStoredSamples();
   
   for (byte i=0; i<number_accel; i++){
     accelMag.getAccelByte((uint8_t*)&buffer_accel[6*i]);
   }
-
-  accelMag.setAccelFIFOMode(LSM303DLHC_FM_BYBASS);
-  accelMag.setAccelFIFOMode(LSM303DLHC_FM_FIFO);
   
-  accelMag.getMagByte((uint8_t*)buffer_mag);
+  //accelMag.setAccelFIFOMode(LSM303DLHC_FM_BYBASS);
+  //accelMag.setAccelFIFOMode(LSM303DLHC_FM_STREAM);
+  
+  //accelMag.getMagByte((uint8_t*)buffer_mag);
   
   number_gyro = gyro.getFIFOStoredDataLevel();
   
   for (byte i=0; i<number_gyro; i++){ 
     gyro.getGyroByte((uint8_t*)&buffer_gyro[6*i]);
   }
-
-  gyro.setFIFOMode(L3GD20H_FM_BYPASS);
-  gyro.setFIFOMode(L3GD20H_FM_FIFO);
-
+  
+  //gyro.setFIFOMode(L3GD20H_FM_BYPASS);
+  //gyro.setFIFOMode(L3GD20H_FM_STREAM);
+  
   /*
   unsigned long m = micros();
   buffer_mag[0] = (m & 0xFF000000) >> 24;
@@ -113,7 +114,7 @@ void readIMU(){
   buffer_mag[5] = number_gyro;
   number_accel = 0;
   number_gyro = 0;
-  */
+  //*/
   
   imuReady = 1;
 }
@@ -135,8 +136,6 @@ byte setupReg(byte cksel, byte refsel, byte diffsel)
 
 void readADC(void)
 {
-  noInterrupts();
-
   static byte j = 0;
   byte data[500];
   byte i = 0;
@@ -162,30 +161,30 @@ void readADC(void)
     imuLocked = 0;
   }
   else{
-    data[k++] = 31;
+    w(31);
   }
 
+  SPI.beginTransaction(spi_settings);
+  digitalWrite(CS_FT, LOW);
   for (i = 0; i < 12; i++)
-  { 
-    digitalWrite(CS_FT, LOW);
+  {
     w(SPI.transfer(0x00));
-    digitalWrite(CS_FT, HIGH);
-    delayMicroseconds(2);
+    //delayMicroseconds(1);
   }
+  digitalWrite(CS_FT, HIGH);
 
+  digitalWrite(CS_ACC, LOW);
   for (i = 12; i < 30; i++)
-  { 
-    digitalWrite(CS_ACC, LOW);
+  {
     w(SPI.transfer(0x00));
-    digitalWrite(CS_ACC, HIGH);
-    delayMicroseconds(2);
+    //delayMicroseconds(1);
   }
+  digitalWrite(CS_ACC, HIGH);
 
   w(j);
 
   Serial.write(data, k);
-  interrupts();
-  Serial.flush();
+  //Serial.flush();
   
   digitalWrite(CS_FT, LOW);
   SPI.transfer(CONV_FT);
@@ -194,17 +193,19 @@ void readADC(void)
   digitalWrite(CS_ACC, LOW);
   SPI.transfer(CONV_ACC);
   digitalWrite(CS_ACC, HIGH);
+  SPI.endTransaction();
 }
 void pulseCS(char pin)
 {
   // Pulses the CS line in between SPI bytes
   digitalWrite(pin, HIGH);
-  delayMicroseconds(2);
+  delayMicroseconds(1);
   digitalWrite(pin, LOW);
 }
 
 void setupFT(void)
 {
+  SPI.beginTransaction(spi_settings);
   digitalWrite(CS_FT, LOW);
   SPI.transfer(RESET);
   pulseCS(CS_FT);
@@ -213,10 +214,12 @@ void setupFT(void)
   pulseCS(CS_FT);
   SPI.transfer(CONV_FT);
   digitalWrite(CS_FT, HIGH);
+  SPI.endTransaction();
 }
 
 void setupACC(void)
 {
+  SPI.beginTransaction(spi_settings);
   digitalWrite(CS_ACC, LOW);
   SPI.transfer(RESET);
   pulseCS(CS_ACC);
@@ -224,6 +227,7 @@ void setupACC(void)
   pulseCS(CS_ACC);
   SPI.transfer(CONV_ACC);
   digitalWrite(CS_ACC, HIGH);
+  SPI.endTransaction();
 }
 
 void parkingSpot(void)
@@ -268,22 +272,24 @@ void setup(void)
 
   // Start SPI, 8Mhz speed, Defaults to mode 0
   SPI.begin();
-  SPI.setClockDivider(SPI_CLOCK_DIV2);
-  SPI.setDataMode(SPI_MODE0);
+  SPI.usingInterrupt(irq);
 
   Wire.begin();
   Wire.setClock(400000L);
   accelMag.initialize();
+  accelMag.rebootAccelMemoryContent();
   accelMag.setAccelFullScale(4);
   accelMag.setAccelBlockDataUpdateEnabled(true);
   accelMag.setAccelHighResOutputEnabled(true);
   accelMag.setAccelOutputDataRate(1344);
+  accelMag.setAccelLowPowerEnabled(false);
   accelMag.setMagOutputDataRate(220);
   accelMag.setMagGain(230);
-  accelMag.setMagMode(LSM303DLHC_MD_CONTINUOUS);
+  accelMag.setMagMode(LSM303DLHC_MD_SLEEP);
 
 
   gyro.initialize();
+  gyro.rebootMemoryContent();
   gyro.setFullScale(500);
   gyro.setBlockDataUpdateEnabled(true);
   gyro.setOutputDataRate(800);
@@ -333,11 +339,13 @@ void loop(void)
       delayMicroseconds(sample_rate);
       accelMag.setAccelFIFOEnabled(false);
       accelMag.setAccelFIFOMode(LSM303DLHC_FM_BYBASS);
-      accelMag.setAccelFIFOMode(LSM303DLHC_FM_FIFO);
+      accelMag.setAccelFIFOMode(LSM303DLHC_FM_STREAM);
+      //accelMag.rebootAccelMemoryContent();
       accelMag.setAccelFIFOEnabled(true);
       gyro.setFIFOEnabled(false);
       gyro.setFIFOMode(L3GD20H_FM_BYPASS);
-      gyro.setFIFOMode(L3GD20H_FM_FIFO);
+      gyro.setFIFOMode(L3GD20H_FM_STREAM);
+      //gyro.rebootMemoryContent();
       gyro.setFIFOEnabled(true);
       irq.begin(readADC, sample_rate);
       //timer1->Start();
