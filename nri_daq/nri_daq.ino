@@ -1,6 +1,56 @@
 #include <IntervalTimer.h>
 #include <SPI.h>
 
+/*
+class SPIClass {
+    public:
+        void begin(byte sck, byte miso, byte mosi) {
+            delay_ = 0;
+            sck_ = sck;
+            miso_ = miso;
+            mosi_ = mosi;
+
+            pinMode(sck_, OUTPUT);
+            pinMode(miso_, INPUT);
+            pinMode(mosi_, OUTPUT);
+        }
+
+        uint8_t transfer(uint8_t out) {
+            // mode 0
+            //  - CPOL = 0, clock starts low
+            //  - CPHA = 0, input on rising edge and output on falling edge
+
+            // clock starts low
+            digitalWrite(sck_, LOW);
+            
+            uint8_t in = 0;
+            for (byte i = 8; i > 0; i--) {
+                uint8_t bit = 1 << (i-1);
+
+                // stage output
+                digitalWrite(mosi_, !!(out & bit));
+
+                // rising edge
+                digitalWrite(sck_, HIGH);
+
+                // read input
+                if (digitalRead(miso_)) {
+                    in |= bit;
+                }
+
+                // falling edge
+                digitalWrite(sck_, LOW);
+            }
+
+            return in;
+        }
+
+    private:
+        byte sck_, miso_, mosi_;
+        uint32_t delay_; // 1/4 period (us)
+} SPI;
+*/
+
 #include "Wire.h"
 #include <math.h>
 
@@ -79,7 +129,7 @@ byte PS_Status =  0;
 #define REQUEST_PS '4'
 
 IntervalTimer irq;
-SPISettings spi_settings(10000000L, MSBFIRST, SPI_MODE0);
+SPISettings spi_settings(1000000L, MSBFIRST, SPI_MODE0);
 
 void readIMU(){
   while (imuLocked == 1) { } // spin
@@ -93,7 +143,7 @@ void readIMU(){
   //accelMag.setAccelFIFOMode(LSM303DLHC_FM_BYBASS);
   //accelMag.setAccelFIFOMode(LSM303DLHC_FM_STREAM);
   
-  //accelMag.getMagByte((uint8_t*)buffer_mag);
+  accelMag.getMagByte((uint8_t*)buffer_mag);
   
   number_gyro = gyro.getFIFOStoredDataLevel();
   
@@ -132,24 +182,29 @@ byte setupReg(byte cksel, byte refsel, byte diffsel)
   return command;
 }
 
-#define w(b) { data[k] = b; ++k; }
+#define w(b) { data[k] = (uint8_t)(b); sum += data[k]; ++k; }
+#define wsum() { data[k] = (uint8_t)(sum); ++k; }
+#define wlen(ll) { w((ll) >> 8); w((ll)); sum = 0; }
 
 void readADC(void)
 {
+  noInterrupts();
   static byte j = 0;
-  byte data[500];
+  uint8_t data[500];
   byte i = 0;
   
   j++;
 
   int k = 0;
+  uint8_t sum = 0;
+  bool checksum = true;
   w('a');
   w('a');
   w('a');
   
   if (imuReady==1){
     imuLocked = 1;
-    w(33 + 6*(number_accel+number_gyro+1));
+    wlen(33 + 6*(number_accel+number_gyro+1) + checksum);
     w(number_accel); w(number_gyro);
     for (int l = 0; l < 6*number_accel; l++) w(buffer_accel[l]);
     for (int l = 0; l < 6*number_gyro;  l++) w(buffer_gyro[l]);
@@ -161,28 +216,38 @@ void readADC(void)
     imuLocked = 0;
   }
   else{
-    w(31);
+    wlen(31 + checksum);
   }
 
+  //int sk = 0;
   SPI.beginTransaction(spi_settings);
-  digitalWrite(CS_FT, LOW);
   for (i = 0; i < 12; i++)
   {
+    //if (i == 0) { sk = k; }
+    digitalWrite(CS_FT, LOW);
     w(SPI.transfer(0x00));
-    //delayMicroseconds(1);
+    digitalWrite(CS_FT, HIGH);
   }
-  digitalWrite(CS_FT, HIGH);
 
-  digitalWrite(CS_ACC, LOW);
   for (i = 12; i < 30; i++)
   {
+    digitalWrite(CS_ACC, LOW);
     w(SPI.transfer(0x00));
-    //delayMicroseconds(1);
+    digitalWrite(CS_ACC, HIGH);
   }
-  digitalWrite(CS_ACC, HIGH);
 
-  w(j);
+  parkingSpot(false);
+  w(PS_Status);
+  if (checksum) wsum();
 
+
+  /*
+  char buf[50] = "";
+  sprintf(buf, "%02X%02X %02X%02X %02X%02X %02X%02X %02X%02X %02X%02X    %02X%02X %02X%02X %02X%02X %02X%02X %02X%02X %02X%02X %02X%02X %02X%02X %02X%02X",
+               data[sk], data[sk+1], data[sk+2], data[sk+3], data[sk+4], data[sk+5], data[sk+6], data[sk+7], data[sk+8], data[sk+9], data[sk+10], data[sk+11],
+               data[sk+12], data[sk+13], data[sk+14], data[sk+15], data[sk+16], data[sk+17], data[sk+18], data[sk+19], data[sk+20], data[sk+21], data[sk+22], data[sk+23], data[sk+24], data[sk+25], data[sk+26], data[sk+27], data[sk+28], data[sk+29]);
+  Serial.println(buf);
+  */
   Serial.write(data, k);
   //Serial.flush();
   
@@ -194,6 +259,7 @@ void readADC(void)
   SPI.transfer(CONV_ACC);
   digitalWrite(CS_ACC, HIGH);
   SPI.endTransaction();
+  interrupts();
 }
 void pulseCS(char pin)
 {
@@ -230,14 +296,14 @@ void setupACC(void)
   SPI.endTransaction();
 }
 
-void parkingSpot(void)
+void parkingSpot(bool write)
 {
   //if the status of the parking spot is requested this function is called
+  PS_Status = 0;
   if(digitalRead(opto)==HIGH)PS_Status=PS_Status   |1;
   if(digitalRead(stick)==HIGH)PS_Status=PS_Status  |2;
   if(digitalRead(biotac)==HIGH)PS_Status=PS_Status |4;
-  Serial.write(0x30 + PS_Status);
-  PS_Status = 0;
+  if (write) { Serial.write(0x30 + PS_Status); }
 }
 
 void setup(void)
@@ -270,9 +336,13 @@ void setup(void)
   digitalWrite(CS_ACC, HIGH);
   digitalWrite(CS_FT, HIGH);
 
-  // Start SPI, 8Mhz speed, Defaults to mode 0
+  // Start SPI
+  //SPI.begin(13, 12, 11);
   SPI.begin();
-  SPI.usingInterrupt(irq);
+  //SPI.usingInterrupt(irq);
+  //SPI.setClockDivider(SPI_CLOCK_DIV8);
+  //SPI.setDataMode(SPI_MODE0);
+  //SPI.setBitOrder(MSBFIRST);
 
   Wire.begin();
   Wire.setClock(400000L);
@@ -285,7 +355,7 @@ void setup(void)
   accelMag.setAccelLowPowerEnabled(false);
   accelMag.setMagOutputDataRate(220);
   accelMag.setMagGain(230);
-  accelMag.setMagMode(LSM303DLHC_MD_SLEEP);
+  accelMag.setMagMode(LSM303DLHC_MD_CONTINUOUS);
 
 
   gyro.initialize();
@@ -294,7 +364,6 @@ void setup(void)
   gyro.setBlockDataUpdateEnabled(true);
   gyro.setOutputDataRate(800);
   gyro.setBandwidthCutOffMode(L3GD20H_BW_MED_LOW);
-
    
   //timer1->setOnTimer(&readIMU);
 }
@@ -347,6 +416,7 @@ void loop(void)
       gyro.setFIFOMode(L3GD20H_FM_STREAM);
       //gyro.rebootMemoryContent();
       gyro.setFIFOEnabled(true);
+      
       irq.begin(readADC, sample_rate);
       //timer1->Start();
       reading = true;
@@ -367,7 +437,7 @@ void loop(void)
     
     if (message[0] == REQUEST_PS)
       {
-        parkingSpot();
+        parkingSpot(true);
       }
     
     if (!Serial.dtr())
