@@ -2,6 +2,11 @@
 #include <SPI.h>
 
 /*
+class SPISettings {
+    public:
+        SPISettings(...) {}
+};
+#define SPI_MODE0 0
 class SPIClass {
     public:
         void begin(byte sck, byte miso, byte mosi) {
@@ -14,6 +19,9 @@ class SPIClass {
             pinMode(miso_, INPUT);
             pinMode(mosi_, OUTPUT);
         }
+
+        void beginTransaction(SPISettings settings) {}
+        void endTransaction() {}
 
         uint8_t transfer(uint8_t out) {
             // mode 0
@@ -73,12 +81,15 @@ volatile uint8_t buffer_accel[200];
 volatile uint8_t buffer_gyro[200];
 volatile uint8_t buffer_mag[6];
 
-
 volatile uint8_t number_gyro = 0;
 volatile uint8_t number_accel = 0;
 volatile bool imuReady = 0;
 volatile bool imuLocked = 0;
+volatile unsigned long last_packet_stamp = 0;
+volatile unsigned long spin_time = 0;
 bool reading = false;
+
+#define IMU true
 
 #define RESET       0x10
 
@@ -129,11 +140,12 @@ byte PS_Status =  0;
 #define REQUEST_PS '4'
 
 IntervalTimer irq;
-SPISettings spi_settings(1000000L, MSBFIRST, SPI_MODE0);
+SPISettings spi_settings(10000000L, MSBFIRST, SPI_MODE0);
 
 void readIMU(){
   while (imuLocked == 1) { } // spin
-  
+
+#if IMU
   number_accel = accelMag.getAccelFIFOStoredSamples();
   
   for (byte i=0; i<number_accel; i++){
@@ -143,7 +155,7 @@ void readIMU(){
   //accelMag.setAccelFIFOMode(LSM303DLHC_FM_BYBASS);
   //accelMag.setAccelFIFOMode(LSM303DLHC_FM_STREAM);
   
-  accelMag.getMagByte((uint8_t*)buffer_mag);
+  //accelMag.getMagByte((uint8_t*)buffer_mag);
   
   number_gyro = gyro.getFIFOStoredDataLevel();
   
@@ -164,7 +176,8 @@ void readIMU(){
   buffer_mag[5] = number_gyro;
   number_accel = 0;
   number_gyro = 0;
-  //*/
+  // */
+#endif
   
   imuReady = 1;
 }
@@ -202,9 +215,12 @@ void readADC(void)
   w('a');
   w('a');
   
+  unsigned long imu_spin_time = 0;
+  static byte imu_num = 0;
   if (imuReady==1){
     imuLocked = 1;
-    wlen(33 + 6*(number_accel+number_gyro+1) + checksum);
+    imu_num = (number_accel+number_gyro+1);
+    wlen(33 + 6*imu_num + checksum);
     w(number_accel); w(number_gyro);
     for (int l = 0; l < 6*number_accel; l++) w(buffer_accel[l]);
     for (int l = 0; l < 6*number_gyro;  l++) w(buffer_gyro[l]);
@@ -212,6 +228,7 @@ void readADC(void)
     //Serial.write((uint8_t*)buffer_accel, 6*number_accel);
     //Serial.write((uint8_t*)buffer_gyro,  6*number_gyro);
     //Serial.write((uint8_t*)buffer_mag,   6);
+    imu_spin_time = spin_time;
     imuReady = 0;
     imuLocked = 0;
   }
@@ -236,8 +253,12 @@ void readADC(void)
     digitalWrite(CS_ACC, HIGH);
   }
 
-  parkingSpot(false);
-  w(PS_Status);
+  //parkingSpot(false);
+  //w(PS_Status);
+  unsigned long this_packet_stamp = micros();
+  w(min((this_packet_stamp - last_packet_stamp)/10, 255));
+  last_packet_stamp = this_packet_stamp;
+  //w(imu_spin_time == 0 ? imu_num : imu_spin_time);
   if (checksum) wsum();
 
 
@@ -339,11 +360,12 @@ void setup(void)
   // Start SPI
   //SPI.begin(13, 12, 11);
   SPI.begin();
-  //SPI.usingInterrupt(irq);
+  SPI.usingInterrupt(irq);
   //SPI.setClockDivider(SPI_CLOCK_DIV8);
   //SPI.setDataMode(SPI_MODE0);
   //SPI.setBitOrder(MSBFIRST);
 
+#if IMU
   Wire.begin();
   Wire.setClock(400000L);
   accelMag.initialize();
@@ -364,6 +386,7 @@ void setup(void)
   gyro.setBlockDataUpdateEnabled(true);
   gyro.setOutputDataRate(800);
   gyro.setBandwidthCutOffMode(L3GD20H_BW_MED_LOW);
+#endif
    
   //timer1->setOnTimer(&readIMU);
 }
@@ -401,6 +424,7 @@ void loop(void)
         sample_rate = SAMPLE_RATE;
       }
       
+#if IMU
       // delay(1);
       setupACC();
       setupFT();
@@ -416,9 +440,11 @@ void loop(void)
       gyro.setFIFOMode(L3GD20H_FM_STREAM);
       //gyro.rebootMemoryContent();
       gyro.setFIFOEnabled(true);
+#endif
       
       irq.begin(readADC, sample_rate);
       //timer1->Start();
+      last_packet_stamp = micros();
       reading = true;
     }
 
