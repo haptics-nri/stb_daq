@@ -220,7 +220,7 @@ void readADC(void)
   if (imuReady==1){
     imuLocked = 1;
     imu_num = (number_accel+number_gyro+1);
-    wlen(33 + 6*imu_num + checksum);
+    wlen(37 + 6*imu_num + checksum);
     w(number_accel); w(number_gyro);
     for (int l = 0; l < 6*number_accel; l++) w(buffer_accel[l]);
     for (int l = 0; l < 6*number_gyro;  l++) w(buffer_gyro[l]);
@@ -233,8 +233,16 @@ void readADC(void)
     imuLocked = 0;
   }
   else{
-    wlen(31 + checksum);
+    wlen(35 + checksum);
   }
+  
+  unsigned long this_packet_stamp = micros();
+  unsigned long diff = this_packet_stamp - last_packet_stamp;
+  last_packet_stamp = this_packet_stamp;
+  w( diff & 0x000000FF);
+  w((diff & 0x0000FFFF) >>  8);
+  w((diff & 0x00FFFFFF) >> 16);
+  w( diff               >> 24);
 
   //int sk = 0;
   SPI.beginTransaction(spi_settings);
@@ -253,12 +261,8 @@ void readADC(void)
     digitalWrite(CS_ACC, HIGH);
   }
 
-  //parkingSpot(false);
-  //w(PS_Status);
-  unsigned long this_packet_stamp = micros();
-  w(min((this_packet_stamp - last_packet_stamp)/10, 255));
-  last_packet_stamp = this_packet_stamp;
-  //w(imu_spin_time == 0 ? imu_num : imu_spin_time);
+  parkingSpot(false);
+  w(PS_Status);
   if (checksum) wsum();
 
 
