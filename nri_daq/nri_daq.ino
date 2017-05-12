@@ -105,7 +105,8 @@ byte PS_Status =  0;
 
 #define PS_request    0x04
 
-#define SETUP_ACC     0x64
+#define SETUP_ACC_INT     0x68 // internal reference
+#define SETUP_ACC_EXT     0x64 // external reference
 #define CONV_ACC    0xC0
 #define CS_ACC      7
 
@@ -134,13 +135,17 @@ byte PS_Status =  0;
 #define UNIPOLAR  0x2
 #define BIPOLAR   0x3
 
-#define START '1' 
-#define STOP '2'
-#define PING '3'
-#define REQUEST_PS '4'
+// commands from controlling computer
+#define START '1'      // start data recording
+#define STOP '2'       // stop data recording
+#define PING '3'       // see if the Teensy is alive (do not run during data collection!)
+#define REQUEST_PS '4' // check state of parking lot (do not run during data collection!)
+#define INT_REF '5'    // switch accelerometers to internal reference
+#define EXT_REF '6'    // switch accelerometers to external reference
 
+byte SETUP_ACC = SETUP_ACC_INT;
 IntervalTimer irq;
-SPISettings spi_settings(10000000L, MSBFIRST, SPI_MODE0);
+SPISettings spi_settings(8000000L, MSBFIRST, SPI_MODE0);
 
 void readIMU(){
   while (imuLocked == 1) { } // spin
@@ -199,11 +204,14 @@ byte setupReg(byte cksel, byte refsel, byte diffsel)
 #define wsum() { data[k] = (uint8_t)(sum); ++k; }
 #define wlen(ll) { w((ll) >> 8); w((ll)); sum = 0; }
 
+volatile int read_adc_depth = 0;
+
 void readADC(void)
 {
+  ++read_adc_depth;
   noInterrupts();
   static byte j = 0;
-  uint8_t data[500];
+  static uint8_t data[500];
   byte i = 0;
   
   j++;
@@ -215,20 +223,22 @@ void readADC(void)
   w('a');
   w('a');
   
-  unsigned long imu_spin_time = 0;
   static byte imu_num = 0;
   if (imuReady==1){
     imuLocked = 1;
     imu_num = (number_accel+number_gyro+1);
-    wlen(37 + 6*imu_num + checksum);
-    w(number_accel); w(number_gyro);
-    for (int l = 0; l < 6*number_accel; l++) w(buffer_accel[l]);
-    for (int l = 0; l < 6*number_gyro;  l++) w(buffer_gyro[l]);
-    for (int l = 0; l < 6;              l++) w(buffer_mag[l]);
-    //Serial.write((uint8_t*)buffer_accel, 6*number_accel);
-    //Serial.write((uint8_t*)buffer_gyro,  6*number_gyro);
-    //Serial.write((uint8_t*)buffer_mag,   6);
-    imu_spin_time = spin_time;
+    if (imu_num > 1) {
+        wlen(37 + 6*imu_num + checksum);
+        w(number_accel); w(number_gyro);
+        for (int l = 0; l < 6*number_accel; l++) w(buffer_accel[l]);
+        for (int l = 0; l < 6*number_gyro;  l++) w(buffer_gyro[l]);
+        for (int l = 0; l < 6;              l++) w(buffer_mag[l]);
+        //Serial.write((uint8_t*)buffer_accel, 6*number_accel);
+        //Serial.write((uint8_t*)buffer_gyro,  6*number_gyro);
+        //Serial.write((uint8_t*)buffer_mag,   6);
+    } else {
+        wlen(35 + checksum);
+    }
     imuReady = 0;
     imuLocked = 0;
   }
@@ -236,55 +246,65 @@ void readADC(void)
     wlen(35 + checksum);
   }
   
-  unsigned long this_packet_stamp = micros();
+  unsigned long this_packet_stamp = micros_noInterrupts();
   unsigned long diff = this_packet_stamp - last_packet_stamp;
   last_packet_stamp = this_packet_stamp;
-  w( diff & 0x000000FF);
-  w((diff & 0x0000FFFF) >>  8);
-  w((diff & 0x00FFFFFF) >> 16);
-  w( diff               >> 24);
+  if (diff > 0xFFFF) {
+      w(0xFF);
+      w(0xFF);
+  } else {
+      w( diff & 0x000000FF);
+      w((diff & 0x0000FFFF) >> 8);
+  }
+  if (spin_time > 0xFFFF) {
+      w(0xFF);
+      w(0xFF);
+  } else {
+      w( spin_time & 0x000000FF);
+      w((spin_time & 0x0000FFFF) >> 8);
+  }
 
   //int sk = 0;
   SPI.beginTransaction(spi_settings);
   for (i = 0; i < 12; i++)
   {
     //if (i == 0) { sk = k; }
-    digitalWrite(CS_FT, LOW);
+    digitalWriteFast(CS_FT, LOW);
     w(SPI.transfer(0x00));
-    digitalWrite(CS_FT, HIGH);
+    digitalWriteFast(CS_FT, HIGH);
   }
 
   for (i = 12; i < 30; i++)
   {
-    digitalWrite(CS_ACC, LOW);
+    digitalWriteFast(CS_ACC, LOW);
     w(SPI.transfer(0x00));
-    digitalWrite(CS_ACC, HIGH);
+    digitalWriteFast(CS_ACC, HIGH);
   }
+  SPI.endTransaction();
 
   parkingSpot(false);
-  w(PS_Status);
+  //w(PS_Status);
+  //w(j);
+  //w(read_adc_depth);
+  w(SETUP_ACC | PS_Status);
   if (checksum) wsum();
 
 
-  /*
-  char buf[50] = "";
-  sprintf(buf, "%02X%02X %02X%02X %02X%02X %02X%02X %02X%02X %02X%02X    %02X%02X %02X%02X %02X%02X %02X%02X %02X%02X %02X%02X %02X%02X %02X%02X %02X%02X",
-               data[sk], data[sk+1], data[sk+2], data[sk+3], data[sk+4], data[sk+5], data[sk+6], data[sk+7], data[sk+8], data[sk+9], data[sk+10], data[sk+11],
-               data[sk+12], data[sk+13], data[sk+14], data[sk+15], data[sk+16], data[sk+17], data[sk+18], data[sk+19], data[sk+20], data[sk+21], data[sk+22], data[sk+23], data[sk+24], data[sk+25], data[sk+26], data[sk+27], data[sk+28], data[sk+29]);
-  Serial.println(buf);
-  */
+  spin_time = micros_noInterrupts();
   Serial.write(data, k);
-  //Serial.flush();
+  spin_time = micros_noInterrupts() - spin_time;
   
-  digitalWrite(CS_FT, LOW);
+  SPI.beginTransaction(spi_settings);
+  digitalWriteFast(CS_FT, LOW);
   SPI.transfer(CONV_FT);
-  digitalWrite(CS_FT, HIGH);
+  digitalWriteFast(CS_FT, HIGH);
 
-  digitalWrite(CS_ACC, LOW);
+  digitalWriteFast(CS_ACC, LOW);
   SPI.transfer(CONV_ACC);
-  digitalWrite(CS_ACC, HIGH);
+  digitalWriteFast(CS_ACC, HIGH);
   SPI.endTransaction();
   interrupts();
+  --read_adc_depth;
 }
 void pulseCS(char pin)
 {
@@ -327,8 +347,8 @@ void parkingSpot(bool write)
   PS_Status = 0;
   if(digitalRead(opto)==HIGH)PS_Status=PS_Status   |1;
   if(digitalRead(stick)==HIGH)PS_Status=PS_Status  |2;
-  if(digitalRead(biotac)==HIGH)PS_Status=PS_Status |4;
-  if (write) { Serial.write(0x30 + PS_Status); }
+  if(digitalRead(biotac)==HIGH)PS_Status=PS_Status |16;
+  if (write) { Serial.write(PS_Status); }
 }
 
 void setup(void)
@@ -469,6 +489,17 @@ void loop(void)
       {
         parkingSpot(true);
       }
+
+    if (message[0] == INT_REF)
+      {
+        SETUP_ACC = SETUP_ACC_INT;
+        setupACC();
+      }
+    if (message[0] == EXT_REF)
+      {
+        SETUP_ACC = SETUP_ACC_EXT;
+        setupACC();
+      }
     
     if (!Serial.dtr())
     {
@@ -479,5 +510,4 @@ void loop(void)
     interrupts();
 
   }
-
 }
